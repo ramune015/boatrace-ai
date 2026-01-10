@@ -2,225 +2,189 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 from datetime import date
+import itertools
 
-# =========================
+# =====================
 # 基本設定
-# =========================
-st.set_page_config(
-    page_title="競艇AI予想",
-    layout="centered"
-)
+# =====================
+st.set_page_config(page_title="競艇AI予想", layout="centered")
 
-FRAME_BONUS = {1:1.00,2:0.92,3:0.85,4:0.78,5:0.70,6:0.60}
 BOAT_COLORS = {
-    1:"white",2:"black",3:"red",
-    4:"blue",5:"yellow",6:"green"
+    1: "#ffffff",
+    2: "#000000",
+    3: "#ff0000",
+    4: "#0066ff",
+    5: "#ffd400",
+    6: "#00aa44",
 }
 
 PLACE_CODES = {
-    "桐生":"01","戸田":"02","江戸川":"03","平和島":"04","蒲郡":"05",
-    "多摩川":"06","浜名湖":"07","三国":"08","びわこ":"09","住之江":"12"
+    "桐生": "01",
+    "戸田": "02",
+    "江戸川": "03",
+    "平和島": "04",
+    "多摩川": "05",
+    "浜名湖": "06",
+    "蒲郡": "07",
+    "常滑": "08",
+    "津": "09",
+    "三国": "10",
+    "びわこ": "11",
+    "住之江": "12",
+    "尼崎": "13",
+    "鳴門": "14",
+    "丸亀": "15",
+    "児島": "16",
+    "宮島": "17",
+    "徳山": "18",
+    "下関": "19",
+    "若松": "20",
+    "芦屋": "21",
+    "福岡": "22",
+    "唐津": "23",
+    "大村": "24",
 }
 
-HEADERS = {"User-Agent":"Mozilla/5.0"}
+# =====================
+# データ取得
+# =====================
+def fetch_entry(date_str, place_code, race_no):
+    url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={race_no}&jcd={place_code}&hd={date_str}"
+    soup = BeautifulSoup(requests.get(url).text, "html.parser")
+    boats = []
 
-# =========================
-# セッション初期化
-# =========================
+    rows = soup.select("tbody.is-fs12 tr")
+    for i, r in enumerate(rows, 1):
+        try:
+            win = float(r.select_one("td.is-lineH2").text.strip())
+        except:
+            win = 0.0
+        boats.append({
+            "boat": i,
+            "win": win,
+            "motor": 0.5
+        })
+    return boats
+
+def fetch_exhibition(date_str, place_code, race_no):
+    url = f"https://www.boatrace.jp/owpc/pc/race/exhibition?rno={race_no}&jcd={place_code}&hd={date_str}"
+    soup = BeautifulSoup(requests.get(url).text, "html.parser")
+    ex = {}
+    rows = soup.select("tbody.is-fs12 tr")
+    for i, r in enumerate(rows, 1):
+        try:
+            t = float(r.select("td")[4].text.strip())
+        except:
+            t = 7.0
+        ex[i] = t
+    return ex
+
+def fetch_odds(date_str, place_code, race_no):
+    url = f"https://www.boatrace.jp/owpc/pc/race/odds3t?rno={race_no}&jcd={place_code}&hd={date_str}"
+    soup = BeautifulSoup(requests.get(url).text, "html.parser")
+    odds = {}
+    for row in soup.select("tbody tr"):
+        tds = row.select("td")
+        if len(tds) >= 2:
+            key = tds[0].text.replace(" ", "")
+            try:
+                odds[key] = float(tds[1].text)
+            except:
+                pass
+    return odds
+
+# =====================
+# スコアリング
+# =====================
+def score_boat(b, ex=None):
+    base = b["win"]
+    if ex:
+        base += max(0, (7 - ex[b["boat"]])) * 0.3
+    return base
+
+def generate_predictions(boats, ex=None):
+    scores = {b["boat"]: score_boat(b, ex) for b in boats}
+    combos = []
+    for a, b, c in itertools.permutations(range(1, 7), 3):
+        s = scores[a]*0.5 + scores[b]*0.3 + scores[c]*0.2
+        combos.append((s, (a, b, c)))
+    combos.sort(reverse=True)
+    return [c for _, c in combos[:6]]
+
+# =====================
+# 表示
+# =====================
+def show_predictions(preds, odds):
+    for i, (a, b, c) in enumerate(preds, 1):
+        key = f"{a}-{b}-{c}"
+        o = odds.get(key, "-")
+        st.markdown(
+            f"""
+            **予想{i}（オッズ {o}）**  
+            <span style="background:{BOAT_COLORS[a]};padding:6px;border-radius:6px">{a}</span>
+            →
+            <span style="background:{BOAT_COLORS[b]};padding:6px;border-radius:6px">{b}</span>
+            →
+            <span style="background:{BOAT_COLORS[c]};padding:6px;border-radius:6px">{c}</span>
+            """,
+            unsafe_allow_html=True
+        )
+
+# =====================
+# UI
+# =====================
+st.title("🚤 競艇AI予想（iPhone対応）")
+
+d = st.date_input("日付", date.today())
+place = st.selectbox("開催場", PLACE_CODES.keys())
+race = st.selectbox("レース番号", list(range(1, 13)))
+
+mode = st.radio("予想モード", ["展示前予想", "展示後予想"], horizontal=True)
+
 if "history" not in st.session_state:
     st.session_state.history = []
 
-if "preds" not in st.session_state:
-    st.session_state.preds = []
+if st.button("予想する"):
+    date_str = d.strftime("%Y%m%d")
+    code = PLACE_CODES[place]
 
-if "odds_map" not in st.session_state:
-    st.session_state.odds_map = {}
+    boats = fetch_entry(date_str, code, race)
+    ex = fetch_exhibition(date_str, code, race) if mode == "展示後予想" else None
+    odds = fetch_odds(date_str, code, race)
 
-# =========================
-# データ取得（展示前）
-# =========================
-def get_boat_data_pre_real(race_date, place, race_no):
-    ymd = race_date.strftime("%Y%m%d")
-    jcd = PLACE_CODES[place]
+    preds = generate_predictions(boats, ex)
+    show_predictions(preds, odds)
 
-    url = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={race_no}&jcd={jcd}&hd={ymd}"
-    res = requests.get(url, headers=HEADERS, timeout=10)
-    res.raise_for_status()
+    st.session_state.current = {
+        "preds": preds,
+        "odds": odds
+    }
 
-    soup = BeautifulSoup(res.text, "html.parser")
-    rows = soup.select("table.is-w748 tbody tr")
+# =====================
+# 結果入力 & 成績
+# =====================
+st.divider()
+st.subheader("📊 結果記録")
 
-    boats = []
-    for i,row in enumerate(rows, start=1):
-        tds = row.find_all("td")
-        boats.append({
-            "boat_no": i,
-            "winrate": float(tds[4].text.strip() or 0),
-            "st_avg": float(tds[6].text.strip() or 0.20),
-            "motor_2rate": float(tds[9].text.strip().replace("%","") or 0)
-        })
+result = st.text_input("結果（三連単 例: 1-2-3）")
+bought = st.checkbox("この予想を買った")
 
-    if len(boats) != 6:
-        raise ValueError("出走表取得失敗")
+if st.button("保存"):
+    hit = any(result == f"{a}-{b}-{c}" for a, b, c in st.session_state.current["preds"])
+    payout = st.session_state.current["odds"].get(result, 0) if hit and bought else 0
+    st.session_state.history.append({
+        "bought": bought,
+        "hit": hit,
+        "payout": payout
+    })
+    st.success("保存しました")
 
-    return boats
+if st.session_state.history:
+    total = len(st.session_state.history)
+    bought = [h for h in st.session_state.history if h["bought"]]
+    hits = [h for h in bought if h["hit"]]
+    roi = sum(h["payout"] for h in hits) / max(1, len(bought)) * 100
 
-# =========================
-# オッズ取得（三連単）
-# =========================
-def get_trifecta_odds(race_date, place, race_no):
-    ymd = race_date.strftime("%Y%m%d")
-    jcd = PLACE_CODES[place]
+    st.write(f"🎯 的中率：{len(hits)/max(1,len(bought))*100:.1f}%")
+    st.write(f"💰 回収率：{roi:.1f}%")
 
-    url = f"https://www.boatrace.jp/owpc/pc/race/odds3t?rno={race_no}&jcd={jcd}&hd={ymd}"
-    res = requests.get(url, headers=HEADERS, timeout=10)
-    res.raise_for_status()
-
-    soup = BeautifulSoup(res.text, "html.parser")
-    odds_map = {}
-
-    rows = soup.select("table.is-w748 tbody tr")
-    for row in rows:
-        tds = row.find_all("td")
-        if len(tds) < 6:
-            continue
-        combo = tds[0].text.strip()
-        try:
-            odds_map[combo] = float(tds[-1].text.strip())
-        except:
-            continue
-
-    return odds_map
-
-# =========================
-# スコア
-# =========================
-def st_score(st):
-    return max(0, min(1, (0.25 - st) / 0.13))
-
-def score_pre(b):
-    return (
-        (b["motor_2rate"]/100)*0.35 +
-        min(1,b["winrate"]/7)*0.30 +
-        FRAME_BONUS[b["boat_no"]]*0.20 +
-        st_score(b["st_avg"])*0.15
-    )
-
-# =========================
-# 三連単6点
-# =========================
-def generate_6(boats):
-    scored = sorted([(b, score_pre(b)) for b in boats],
-                    key=lambda x:x[1], reverse=True)
-    res=[]
-    for a,_ in scored[:2]:
-        for b,_ in scored[1:4]:
-            if a["boat_no"]==b["boat_no"]: continue
-            for c,_ in scored:
-                if c["boat_no"] in (a["boat_no"],b["boat_no"]): continue
-                res.append(f"{a['boat_no']}-{b['boat_no']}-{c['boat_no']}")
-                if len(res)==6:
-                    return res
-    return res
-
-# =========================
-# 表示用
-# =========================
-def color_text(tri):
-    return "-".join(
-        f"<span style='color:{BOAT_COLORS[int(x)]};font-weight:bold;font-size:20px'>{x}</span>"
-        for x in tri.split("-")
-    )
-
-# =========================
-# UI
-# =========================
-st.title("🚤 競艇AI予想（iPhone対応）")
-
-c1,c2,c3 = st.columns(3)
-with c1:
-    race_date = st.date_input("日付", value=date.today())
-with c2:
-    place = st.selectbox("開催場", PLACE_CODES.keys())
-with c3:
-    race_no = st.selectbox("レース", [str(i) for i in range(1,13)])
-
-# =========================
-# 予想実行
-# =========================
-if st.button("展示前で予想する", use_container_width=True):
-    boats = get_boat_data_pre_real(race_date, place, race_no)
-    preds = generate_6(boats)
-    st.session_state.preds = preds
-
-    try:
-        st.session_state.odds_map = get_trifecta_odds(race_date, place, race_no)
-    except:
-        st.session_state.odds_map = {}
-
-# =========================
-# 予想表示
-# =========================
-if st.session_state.preds:
-    st.markdown("### 📌 予想6点")
-    for i,p in enumerate(st.session_state.preds,1):
-        st.markdown(f"**予想{i}：** {color_text(p)}", unsafe_allow_html=True)
-
-# =========================
-# 結果入力
-# =========================
-st.markdown("---")
-st.subheader("📝 結果入力")
-
-result = st.text_input("実際の三連単（例: 1-2-3）")
-bought = st.radio("このレースは買いましたか？", ["買った","買ってない"], horizontal=True)
-
-if st.button("結果を保存"):
-    if result:
-        hit = result in st.session_state.preds
-        bet = 600 if bought=="買った" else 0
-
-        ret = 0
-        if hit and bought=="買った":
-            if result in st.session_state.odds_map:
-                ret = int(100 * st.session_state.odds_map[result])
-            else:
-                ret = 100 * 20
-
-        st.session_state.history.append({
-            "hit": hit,
-            "bought": bought=="買った",
-            "bet": bet,
-            "ret": ret
-        })
-        st.success("保存しました")
-
-# =========================
-# 集計
-# =========================
-def calc(records):
-    if not records:
-        return 0,0
-    hits = sum(1 for r in records if r["hit"])
-    bet = sum(r["bet"] for r in records)
-    ret = sum(r["ret"] for r in records)
-    hit_rate = hits/len(records)*100
-    rec = ret/bet*100 if bet>0 else 0
-    return hit_rate, rec
-
-st.markdown("---")
-st.subheader("📊 成績")
-
-all_hr, all_rec = calc(st.session_state.history)
-buy_hr, buy_rec = calc([r for r in st.session_state.history if r["bought"]])
-
-cA,cB = st.columns(2)
-with cA:
-    st.markdown("### 🟩 全予想")
-    st.write(f"的中率：{all_hr:.1f}%")
-    st.write(f"回収率：{all_rec:.1f}%")
-
-with cB:
-    st.markdown("### 🟦 購入レース")
-    st.write(f"的中率：{buy_hr:.1f}%")
-    st.write(f"回収率：{buy_rec:.1f}%")
